@@ -1,0 +1,30 @@
+repos:
+  # Official pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.1.0  # Use the latest release
+    hooks:
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: end-of-file-fixer
+
+  # Terraform fmt and validate
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.53.0  # Use the latest release
+    hooks:
+      - id: terraform_fmt
+      # - id: terraform_validate
+      #   args: ["--args=-no-color"]
+
+
+  # # TFLint for Terraform
+  # - repo: https://github.com/terraform-linters/tflint
+  #   rev: v0.50.3  # Use the latest release
+  #   hooks:
+  #     - id: tflint
+
+  # TFSec for security scanning
+  - repo: https://github.com/aquasecurity/tfsec
+    rev: v1.25.0  # Use the latest release
+    hooks:
+      - id: tfsec
+        args: ["--soft-fail"]

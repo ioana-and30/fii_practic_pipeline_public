@@ -1,0 +1,166 @@
+# Name of the pipeline
+name: Deploy Infrastructure with Terraform
+
+# Trigger this workflow only when pushing to the main branch
+on:
+  push:
+    branches:
+      - main
+
+# GitHub permissions needed for this workflow, including for OIDC authentication
+permissions:
+  id-token: write  # Required for OIDC to assume AWS roles
+  contents: write   # Needed for repo access (e.g., for plan/apply)
+
+# Define the main job
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest  # Use the latest Ubuntu runner from GitHub
+
+    steps:
+      # Step 1: Checkout the repo's code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Terraform CLI
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # Step 3: Configure AWS credentials via OIDC (no long-lived, hardcoded credentials)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
+          role-session-name: ${{ secrets.ROLE_SESSION_NAME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 4: Install Pre-commit to run code quality hooks
+      - name: Install Pre-commit
+        run: pip install pre-commit
+
+      # Step 5: Run pre-commit hooks (e.g., trailing whitespace, YAML linting, etc.)
+      - name: Run Pre-commit Hooks
+        run: pre-commit run --all-files --show-diff-on-failure
+
+      # Step 6: Check Terraform formatting (fails if it's not formatted)
+      - name: Terraform Format
+        run: terraform fmt -check
+        id: fmt
+
+      # Step 7: Install tflint (Terraform linter for best practices)
+      - name: Install tflint
+        run: |
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+      # Step 8: Run tflint (won't fail the pipeline if issues found)
+      - name: Run tflint
+        continue-on-error: true
+        run: tflint
+
+      # Step 9: Install tfsec (security scanner for Terraform)
+      - name: Install tfsec
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+      # Step 10: Run tfsec (security issues don't fail the pipeline here)
+      - name: Run tfsec
+        continue-on-error: true
+        run: tfsec .
+
+      # Step 11: Fail the pipeline if the formatting check from earlier failed
+      - name: Fail if format changes are needed
+        if: steps.fmt.outputs.exitcode != '0'
+        run: exit 1
+
+      # Step 12: Initialize the Terraform project
+      - name: Terraform Initialize
+        run: terraform init
+
+      # Step 13: Validate Terraform syntax and structure
+      - name: Terraform Validate
+        run: terraform validate
+
+      # Step 14: Create a Terraform execution plan
+      - name: Terraform Plan
+        run: terraform plan
+
+      # Step 15: Apply the plan to deploy infrastructure automatically
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+
+      # # Wait for EC2 instance to be running and SSM ready
+      # - name: Wait for EC2 instance(s) to be SSM available
+      #   id: wait_ssm
+      #   run: |
+      #     INSTANCE_IDS=$(aws ec2 describe-instances \
+      #       --region eu-west-1 \
+      #       --filters "Name=tag:Name,Values=oidc-instance" \
+      #       --query "Reservations[*].Instances[*].InstanceId" \
+      #       --output text | tr '\n' ' ')
+
+      #     echo "Waiting for SSM availability: $INSTANCE_IDS"
+
+      #     for ID in $INSTANCE_IDS; do
+      #       while true; do
+      #         STATUS=$(aws ssm describe-instance-information \
+      #           --filters "Key=InstanceIds,Values=$ID" \
+      #           --region eu-west-1 \
+      #           --query "InstanceInformationList[0].PingStatus" \
+      #           --output text 2>/dev/null)
+
+      #         if [[ "$STATUS" == "Online" ]]; then
+      #           echo "$ID is now SSM available ✅"
+      #           break
+      #         fi
+
+      #         echo "Still waiting for $ID..."
+      #         sleep 10
+      #       done
+      #     done
+
+      #     echo "instance_ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
+
+      # # Step 16: Use SSM to send commands to the EC2 instance (install & configure nginx)
+      # - name: Fetch public instance ID and run SSM command
+      #   id: fetch_instances
+      #   run: |
+      #     INSTANCE_IDS=$(aws ec2 describe-instances \
+      #       --region eu-west-1 \
+      #       --filters "Name=tag:Name,Values=oidc-instance" "Name=instance-state-name,Values=running" \
+      #       --query "Reservations[*].Instances[*].InstanceId" \
+      #       --output text | tr '\n' ' ')
+
+      #     echo "Found instances: $INSTANCE_IDS"
+
+      #     echo "instance_ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
+
+      #     for ID in $INSTANCE_IDS; do
+      #       echo "Sending SSM command to $ID"
+      #       aws ssm send-command \
+      #         --instance-ids "$ID" \
+      #         --document-name "AWS-RunShellScript" \
+      #         --parameters commands='[
+      #           "sudo dnf update -y && sudo dnf install -y nginx",
+      #           "sudo mkdir -p /var/www/ssm",
+      #           "echo '\''<!doctype html><html><head><meta charset=\"utf-8\"><title>Hello, Nginx!</title></head><body><h1>Hello, Nginx!</h1><p>We have just configured our Nginx web server on Amazon Linux using an SSM command!</p></body></html>'\'' | sudo tee /var/www/ssm/index.html",
+      #           "echo '\''server { listen 80; server_name ssm.com; root /var/www/ssm; index index.html; location / { try_files $uri $uri/ =404; } }'\'' | sudo tee /etc/nginx/conf.d/ssm_site.conf",
+      #           "sudo systemctl enable nginx",
+      #           "sudo systemctl start nginx"
+      #         ]' \
+      #         --region eu-west-1 \
+      #         --output text
+      #     done
+
+      # # Step 17: Output the public IPs of the instances
+      # - name: Fetch and output public instance IPs
+      #   run: |
+      #     INSTANCE_IDS="${{ steps.fetch_instances.outputs.instance_ids }}"
+      #     for ID in $INSTANCE_IDS; do
+      #       PUBLIC_IP=$(aws ec2 describe-instances \
+      #         --region eu-west-1 \
+      #         --instance-ids "$ID" \
+      #         --query "Reservations[*].Instances[*].PublicIpAddress" \
+      #         --output text)
+      #       echo "Instance ID $ID has public IP: $PUBLIC_IP"
+      #     done
